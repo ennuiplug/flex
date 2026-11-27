@@ -3,6 +3,7 @@ local tab = ui.tab("Emote wheel")
 local playSelectedDance, stopSelectedDance, resetWheel, freezeWheelView
 local musicEnabled, volume, cameraDistance, allowWalking, loopAnimation, readAsset, widePath
 local resourceRoot, gameResourceDir, tickInstaller, closeInstaller
+local settings, favoriteSettings
 local function logError(message)
     print("[emotes] ", message)
 end
@@ -132,7 +133,7 @@ do
 
 
 
-    local settings = tab:group("Колесо эмоций", "left")
+    settings = tab:group("Колесо эмоций", "left")
 
     local slots = 6
     local pi = math.pi
@@ -163,7 +164,7 @@ do
     addPages("Эмоции", gestures)
 
     local favoriteControls = {}
-    local favoriteSettings = tab:group("Избранные эмоции", "right")
+    favoriteSettings = tab:group("Избранные эмоции", "right")
     for i = 1, slots do
         local default = emotes[i][2]
         local choices = {default, "Пусто"}
@@ -757,7 +758,10 @@ do
     end
 
     events.render:set(function()
-        if tickInstaller then tickInstaller(state.icons) end
+        if tickInstaller and not tickInstaller(state.icons) then
+            state.keys = keyStates()
+            return
+        end
         if not state.open and wheelHook then stopWheelHook() end
         local now = tonumber(utils.timestamp())
         if not now then return end
@@ -1890,27 +1894,71 @@ $modelPath = Join-Path ([Environment]::CurrentDirectory) 'characters\kolka\fortn
 $modelHash = '45BFA5B2D87D0305CF29D076F8C7B15B5F086D8C521FC8FB4683C812054C43EE'
 $url = 'https://github.com/ennuiplug/flex/releases/download/v1.0.0/emotes.zip'
 $archiveHash = 'C214489498AC541C4C87CBF1F2ABDCF528E44911597CE9D391A592752AC04DF0'
+$archiveSize = 250242910
+$journal = Join-Path $root ("install-$PID.log")
+$utf8 = New-Object Text.UTF8Encoding($false)
 $mutex = New-Object Threading.Mutex($false, 'Local\RezTOP.EmoteWheel.v1')
 $owns = $false
-$zip = $null
-$part = $null
-$modelPart = $null
+$zip = $part = $modelPart = $http = $response = $inputStream = $outputStream = $null
 $exitCode = 0
+
+function Write-Journal([string]$line) {
+    [IO.File]::AppendAllText($journal, $line + [Environment]::NewLine, $utf8)
+}
+
 try {
     try { $owns = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owns = $true }
     if (-not $owns) { exit 2 }
     [void][IO.Directory]::CreateDirectory($root)
+    [IO.File]::WriteAllText($journal, '', $utf8)
+    Write-Journal "S Скачивание архива (250 МБ)"
+    Write-Journal "L Источник: $url"
+    Write-Journal "L Иконки и музыка: $root"
+    Write-Journal "L Модель CS2: $modelPath"
     $hasModel = [IO.File]::Exists($modelPath)
     if ($hasModel -and (Get-FileHash -LiteralPath $modelPath -Algorithm SHA256).Hash -ne $modelHash) {
         throw "Existing model differs from the release: $modelPath"
     }
     $part = Join-Path $root ([IO.Path]::GetRandomFileName() + '.zip')
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri $url -UseBasicParsing -OutFile $part
-    if ((Get-Item -LiteralPath $part).Length -ne 250242910 -or
+    Add-Type -AssemblyName System.Net.Http
+    $http = New-Object Net.Http.HttpClient
+    $http.Timeout = [TimeSpan]::FromMinutes(10)
+    $http.DefaultRequestHeaders.UserAgent.ParseAdd('RezTOP-EmoteWheel')
+    $response = $http.GetAsync($url, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+    [void]$response.EnsureSuccessStatusCode()
+    $inputStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+    if ($inputStream.CanTimeout) { $inputStream.ReadTimeout = 60000 }
+    $outputStream = [IO.File]::Open($part, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
+    $buffer = New-Object byte[] 65536
+    $downloaded = 0L
+    $lastProgress = -1
+    $lastMilestone = 0
+    while (($read = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+        $downloaded += $read
+        if ($downloaded -gt $archiveSize) { throw 'Resource archive exceeds expected size' }
+        $outputStream.Write($buffer, 0, $read)
+        $progress = [int][Math]::Floor($downloaded * 88.0 / $archiveSize)
+        if ($progress -ne $lastProgress) {
+            Write-Journal "P $progress"
+            $lastProgress = $progress
+        }
+        $milestone = [int][Math]::Floor($downloaded * 10.0 / $archiveSize)
+        if ($milestone -gt $lastMilestone) {
+            Write-Journal ('L Скачано архива: {0}%' -f ($milestone * 10))
+            $lastMilestone = $milestone
+        }
+    }
+    $outputStream.Dispose()
+    $outputStream = $null
+    Write-Journal 'S Проверка SHA-256'
+    Write-Journal 'L Архив получен, проверяется размер и SHA-256.'
+    if ($downloaded -ne $archiveSize -or
         (Get-FileHash -LiteralPath $part -Algorithm SHA256).Hash -ne $archiveHash) {
         throw 'Resource archive checksum does not match release'
     }
+    Write-Journal 'P 90'
+    Write-Journal 'L Контрольная сумма совпала.'
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [IO.Compression.ZipFile]::OpenRead($part)
     $icons = @($zip.Entries | Where-Object { $_.FullName -cmatch '^emotes/icons/[a-zA-Z0-9_.-]+\.png$' })
@@ -1919,26 +1967,43 @@ try {
     if ($icons.Count -ne 118 -or $music.Count -ne 102 -or -not $model) { throw 'Incomplete archive' }
     $iconDir = [IO.Directory]::CreateDirectory((Join-Path $root 'icons')).FullName
     $musicDir = [IO.Directory]::CreateDirectory((Join-Path $root 'music')).FullName
+    Write-Journal 'S Установка иконок'
+    Write-Journal "L Распаковка 118 иконок: $iconDir"
     foreach ($asset in $icons) {
         [IO.Compression.ZipFileExtensions]::ExtractToFile($asset, (Join-Path $iconDir $asset.Name), $true)
     }
+    Write-Journal 'P 94'
+    Write-Journal 'S Установка музыки'
+    Write-Journal "L Распаковка 102 звуковых дорожек: $musicDir"
     foreach ($asset in $music) {
         [IO.Compression.ZipFileExtensions]::ExtractToFile($asset, (Join-Path $musicDir $asset.Name), $true)
     }
+    Write-Journal 'P 98'
+    Write-Journal 'S Проверка модели'
     if (-not $hasModel) {
+        Write-Journal "L Установка модели: $modelPath"
         [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($modelPath))
         $modelPart = $modelPath + '.' + [IO.Path]::GetRandomFileName()
         [IO.Compression.ZipFileExtensions]::ExtractToFile($model, $modelPart, $false)
         if ((Get-FileHash -LiteralPath $modelPart -Algorithm SHA256).Hash -ne $modelHash) { throw 'Model checksum does not match release' }
         [IO.File]::Move($modelPart, $modelPath)
+    } else {
+        Write-Journal "L Модель уже установлена, контрольная сумма совпадает: $modelPath"
     }
     [IO.File]::WriteAllText((Join-Path $root 'installed'), $archiveHash)
+    Write-Journal 'P 100'
+    Write-Journal 'L Установка завершена. Ресурсы готовы.'
 } catch {
     $exitCode = 1
     if ([IO.Directory]::Exists($root)) {
+        Write-Journal ('E ' + ($_.Exception.Message -replace '[\r\n]+', ' '))
         [IO.File]::WriteAllText((Join-Path $root 'install-error.txt'), $_.Exception.Message)
     }
 } finally {
+    if ($outputStream) { $outputStream.Dispose() }
+    if ($inputStream) { $inputStream.Dispose() }
+    if ($response) { $response.Dispose() }
+    if ($http) { $http.Dispose() }
     if ($zip) { $zip.Dispose() }
     if ($part -and [IO.File]::Exists($part)) { [IO.File]::Delete($part) }
     if ($modelPart -and [IO.File]::Exists($modelPart)) { [IO.File]::Delete($modelPart) }
@@ -1949,8 +2014,8 @@ exit $exitCode
 ]==]
 
     local installer = tab:group("Ресурсы", "right")
-    local status = installer:label("Ресурсы не установлены")
-    local process
+    local downloadButton, status, progress
+    local process, journal, journalOffset, nextPoll, loggedError, ready
     local exitCode = ffi.new("uint32_t[1]")
     local function fileExists(path)
         local wide = widePath(path)
@@ -1974,45 +2039,111 @@ exit $exitCode
     end
 
     local gameDir = gameResourceDir()
-    if installed(gameDir) then status:name("Ресурсы установлены") end
-    installer:button("Скачать ресурсы", function()
+    local function showMenu()
+        ready = true
+        installer:visible(false)
+        settings:visible(true)
+        favoriteSettings:visible(true)
+    end
+    local function showInstallError(message)
+        progress:visible(false)
+        downloadButton:visible(true)
+        status:name(message)
+        status:visible(true)
+    end
+    downloadButton = installer:button("Скачать ресурсы", function()
         if process then return end
         gameDir = gameResourceDir()
-        if not resourceRoot or not gameDir then status:name("Не удалось определить папки установки") return end
-        if installed(gameDir) then status:name("Ресурсы установлены") return end
+        if not resourceRoot or not gameDir then showInstallError("Не удалось определить папки установки") return end
+        if installed(gameDir) then showMenu() return end
         local base = utf8(pathBuffer, win.GetSystemDirectoryW(pathBuffer, 32768))
         local encoded = encodedCommand()
-        if not base or not encoded then status:name("Не удалось подготовить установщик") return end
+        if not base or not encoded then showInstallError("Не удалось подготовить установщик") return end
         local exe = base .. "\\WindowsPowerShell\\v1.0\\powershell.exe"
         local command = utf16('"' .. exe .. '" -NoProfile -NonInteractive -EncodedCommand ' .. encoded)
         local startup, info = ffi.new("emote_install_startup[1]"), ffi.new("emote_install_process[1]")
         startup[0].cb = ffi.sizeof("emote_install_startup")
         if not command or win.CreateProcessW(utf16(exe), command, nil, nil, 0, 0x08000000, nil,
             widePath(gameDir), startup, info) == 0 then
-            status:name("Не удалось запустить установщик")
+            showInstallError("Не удалось запустить установщик")
             return
         end
         process = info[0].process
+        journal = resourceRoot .. "\\install-" .. tostring(tonumber(info[0].pid)) .. ".log"
+        journalOffset, nextPoll, loggedError = 0, 0, false
         win.CloseHandle(info[0].thread)
-        status:name("Загрузка и установка ресурсов (250 МБ)")
+        downloadButton:visible(false)
+        progress:set(0)
+        progress:visible(true)
+        status:name("Подключение к GitHub")
+        status:visible(true)
     end)
+    progress = installer:slider("Прогресс установки", 0, 100, 0, 1, "%")
+    progress:disabled(true)
+    progress:visible(false)
+    status = installer:label("Подключение к GitHub")
+    status:visible(false)
+    if installed(gameDir) then
+        showMenu()
+    else
+        settings:visible(false)
+        favoriteSettings:visible(false)
+    end
+
+    local function readJournal()
+        local buffer, size = readAsset(journal, 1, 64 * 1024)
+        if not buffer or size <= journalOffset then return end
+        local latestProgress, latestStage, consumed
+        for line, nextAt in ffi.string(buffer, size):sub(journalOffset + 1):gmatch("([^\n]*)\n()") do
+            consumed = nextAt - 1
+            local kind, value = line:gsub("\r$", ""):match("^([PLSE]) (.+)$")
+            if kind == "P" then
+                latestProgress = tonumber(value)
+            elseif kind == "S" then
+                latestStage = value
+            elseif kind == "L" then
+                print("[emotes install] ", value)
+            elseif kind == "E" then
+                loggedError = true
+                logError(value)
+            end
+        end
+        journalOffset = journalOffset + (consumed or 0)
+        if latestProgress and latestProgress >= 0 and latestProgress <= 100 then progress:set(latestProgress) end
+        if latestStage then status:name(latestStage) end
+    end
 
     closeInstaller = function()
         if process then win.CloseHandle(process) process = nil end
     end
     tickInstaller = function(icons)
-        if not process then return end
+        if ready then return true end
+        local now = tonumber(utils.timestamp()) or 0
+        if not process then
+            if now >= (nextPoll or 0) then
+                nextPoll = now + 1000
+                gameDir = gameResourceDir()
+                if installed(gameDir) then showMenu() end
+            end
+            return ready == true
+        end
         local ok = win.GetExitCodeProcess(process, exitCode) ~= 0
-        if ok and exitCode[0] == 259 then return end
+        local running = ok and exitCode[0] == 259
+        if not running or now >= nextPoll then
+            nextPoll = now + 120
+            readJournal()
+        end
+        if running then return false end
         closeInstaller()
         if ok and exitCode[0] == 0 and installed(gameDir) then
             for key in pairs(icons) do icons[key] = nil end
-            status:name("Ресурсы установлены")
+            showMenu()
         elseif ok and exitCode[0] == 2 then
-            status:name("Установка уже запущена")
+            showInstallError("Установка уже запущена")
         else
-            status:name("Ошибка установки · install-error.txt")
-            logError("Ошибка установки ресурсов. Журнал: " .. resourceRoot .. "\\install-error.txt")
+            showInstallError("Ошибка установки · install-error.txt")
+            if not loggedError then logError("Ошибка установки ресурсов. Журнал: " .. resourceRoot .. "\\install-error.txt") end
         end
+        return ready == true
     end
 end
