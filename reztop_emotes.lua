@@ -1884,6 +1884,7 @@ do
 
     local installScript = [==[
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $root = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'RezTOP\EmoteWheel\v1.0.0'
 $modelPath = Join-Path ([Environment]::CurrentDirectory) 'characters\kolka\fortnite_dance.vmdl_c'
 $modelHash = '45BFA5B2D87D0305CF29D076F8C7B15B5F086D8C521FC8FB4683C812054C43EE'
