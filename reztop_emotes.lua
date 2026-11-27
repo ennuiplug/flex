@@ -989,7 +989,7 @@ do
     local function resolve()
         local clientBase = verifyModule(modules.client)
         local engine = verifyModule(modules.engine)
-        if not client or not engine then return nil, "Бинарники отличаются от билда 26879581" end
+        if not clientBase or not engine then return nil, "Бинарники отличаются от билда 26879581" end
 
         local exists, path = checkModelFile()
         if not exists then return nil, path and ("Модель отсутствует: " .. path) or "Путь к папке игры не определён" end
