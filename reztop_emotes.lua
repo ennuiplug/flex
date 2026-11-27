@@ -1871,14 +1871,20 @@ do
             uint16_t show, reservedSize; void *reservedBytes, *input, *output, *error;
         } emote_install_startup;
         typedef struct { void *process, *thread; uint32_t pid, tid; } emote_install_process;
+        typedef struct {
+            uint32_t attributes, timestamps[6], sizeHigh, sizeLow;
+        } emote_resource_attributes;
         uint32_t __stdcall GetEnvironmentVariableW(const uint16_t *, uint16_t *, uint32_t);
         uint32_t __stdcall GetSystemDirectoryW(uint16_t *, uint32_t);
         uint32_t __stdcall GetModuleFileNameW(void *, uint16_t *, uint32_t);
+        int __stdcall GetFileAttributesExW(const uint16_t *, int, emote_resource_attributes *);
         int __stdcall WideCharToMultiByte(uint32_t, uint32_t, const uint16_t *, int, char *, int, void *, void *);
         int __stdcall CreateProcessW(const uint16_t *, uint16_t *, void *, void *, int, uint32_t, void *,
             const uint16_t *, emote_install_startup *, emote_install_process *);
         int __stdcall GetExitCodeProcess(void *, uint32_t *);
         int __stdcall CryptBinaryToStringA(const void *, uint32_t, uint32_t, char *, uint32_t *);
+        int __stdcall CryptHashCertificate2(const uint16_t *, uint32_t, void *, const uint8_t *, uint32_t,
+            uint8_t *, uint32_t *);
     ]]
     local win = ffi.load("kernel32")
     local crypto = ffi.load("crypt32")
@@ -2037,15 +2043,258 @@ exit $exitCode
 
     local process, journal, journalOffset, nextPoll, loggedError, ready
     local exitCode = ffi.new("uint32_t[1]")
-    local function fileExists(path)
+    local resourceSizes = {
+        ["icons\\DanceMoves.png"] = 6064,
+        ["icons\\ElectroShuffle.png"] = 6236,
+        ["icons\\Emote_AerobicChamp.png"] = 8180,
+        ["icons\\Emote_AirShredder.png"] = 8232,
+        ["icons\\Emote_BandOfTheFort.png"] = 6736,
+        ["icons\\Emote_Bendy.png"] = 7647,
+        ["icons\\Emote_BlindingLights.png"] = 7551,
+        ["icons\\Emote_BlowKiss.png"] = 7667,
+        ["icons\\Emote_Boogie_Down_Intro.png"] = 6968,
+        ["icons\\Emote_Bring_It_On.png"] = 5873,
+        ["icons\\Emote_Calculated.png"] = 8674,
+        ["icons\\Emote_Capoeira.png"] = 7882,
+        ["icons\\Emote_Celebration_Loop.png"] = 6611,
+        ["icons\\Emote_Cena.png"] = 7523,
+        ["icons\\Emote_Charleston.png"] = 5714,
+        ["icons\\Emote_Chicken.png"] = 7269,
+        ["icons\\Emote_Chug.png"] = 6853,
+        ["icons\\Emote_Confused.png"] = 6645,
+        ["icons\\Emote_Crossbounce.png"] = 7204,
+        ["icons\\Emote_Cry.png"] = 7872,
+        ["icons\\Emote_Dab.png"] = 6326,
+        ["icons\\Emote_Dance_Breakdance.png"] = 6643,
+        ["icons\\Emote_Dance_Disco_T3.png"] = 8485,
+        ["icons\\Emote_Dance_Loser.png"] = 6343,
+        ["icons\\Emote_Dance_NoBones.png"] = 7595,
+        ["icons\\Emote_Dance_Pump.png"] = 7772,
+        ["icons\\Emote_Dance_RideThePony.png"] = 6517,
+        ["icons\\Emote_Dance_Shoot.png"] = 7309,
+        ["icons\\Emote_Dance_SwipeIt.png"] = 7601,
+        ["icons\\Emote_Dance_Worm.png"] = 7312,
+        ["icons\\Emote_DG_Disco.png"] = 8485,
+        ["icons\\Emote_DistractionDance.png"] = 6825,
+        ["icons\\Emote_DustingOffHands.png"] = 7377,
+        ["icons\\Emote_DustOffShoulders.png"] = 6494,
+        ["icons\\Emote_EasternBloc_Start.png"] = 7730,
+        ["icons\\Emote_Facepalm.png"] = 6189,
+        ["icons\\Emote_FancyFeet.png"] = 6408,
+        ["icons\\Emote_Fishing.png"] = 7326,
+        ["icons\\Emote_Flex.png"] = 6617,
+        ["icons\\Emote_FlippnSexy.png"] = 7890,
+        ["icons\\Emote_FlossDance.png"] = 6693,
+        ["icons\\Emote_Fonzie_Pistol.png"] = 6847,
+        ["icons\\Emote_Fresh.png"] = 11700,
+        ["icons\\Emote_Friday13.png"] = 9093,
+        ["icons\\Emote_Gangnam_Style.png"] = 7878,
+        ["icons\\Emote_Ghostbusters.png"] = 7997,
+        ["icons\\Emote_golfclap.png"] = 7228,
+        ["icons\\Emote_Griddy.png"] = 8424,
+        ["icons\\Emote_GrooveJam.png"] = 6724,
+        ["icons\\Emote_guitar.png"] = 10675,
+        ["icons\\Emote_HandSignals.png"] = 8039,
+        ["icons\\Emote_Headbanger.png"] = 7467,
+        ["icons\\Emote_HeelClick.png"] = 7086,
+        ["icons\\Emote_Hillbilly_Shuffle_Intro.png"] = 9322,
+        ["icons\\Emote_Hiphop_01.png"] = 6450,
+        ["icons\\Emote_HitchHiker.png"] = 7355,
+        ["icons\\Emote_Hotstuff.png"] = 7212,
+        ["icons\\Emote_Hula_Start.png"] = 7584,
+        ["icons\\Emote_IBreakYou.png"] = 6113,
+        ["icons\\Emote_IHeartYou.png"] = 8720,
+        ["icons\\Emote_ILikeToMoveIt.png"] = 7407,
+        ["icons\\Emote_InDaGhetto.png"] = 7463,
+        ["icons\\Emote_InfiniDab_Intro.png"] = 7094,
+        ["icons\\Emote_Intensity_Start.png"] = 6581,
+        ["icons\\Emote_IrishJig_Start.png"] = 3170,
+        ["icons\\Emote_ItsGoTime.png"] = 7607,
+        ["icons\\Emote_KneeSlapper.png"] = 7114,
+        ["icons\\Emote_KoreanEagle.png"] = 6347,
+        ["icons\\Emote_Kpop_02.png"] = 6795,
+        ["icons\\Emote_KungFu_Salute.png"] = 5540,
+        ["icons\\Emote_Laugh.png"] = 7103,
+        ["icons\\Emote_Lebron.png"] = 7245,
+        ["icons\\Emote_LivingLarge.png"] = 7279,
+        ["icons\\Emote_Luchador.png"] = 9165,
+        ["icons\\Emote_Macarena.png"] = 7254,
+        ["icons\\Emote_Make_It_Rain.png"] = 7497,
+        ["icons\\Emote_Maracas.png"] = 6726,
+        ["icons\\Emote_Martian.png"] = 7019,
+        ["icons\\Emote_Mask_Off_Intro.png"] = 7311,
+        ["icons\\Emote_NeverGonna.png"] = 7669,
+        ["icons\\Emote_NinjaStyle.png"] = 7718,
+        ["icons\\Emote_NotToday.png"] = 6505,
+        ["icons\\Emote_PopLock.png"] = 7366,
+        ["icons\\Emote_PopRock.png"] = 6596,
+        ["icons\\Emote_PumpkinDance.png"] = 7772,
+        ["icons\\Emote_PumpUpTheJam.png"] = 7109,
+        ["icons\\Emote_RememberMe_Intro.png"] = 6887,
+        ["icons\\Emote_Renegade.png"] = 6389,
+        ["icons\\Emote_RobotDance.png"] = 7707,
+        ["icons\\Emote_RockPaperScissor_Paper.png"] = 6208,
+        ["icons\\Emote_RockPaperScissor_Rock.png"] = 6208,
+        ["icons\\Emote_RockPaperScissor_Scissor.png"] = 6208,
+        ["icons\\Emote_Rollie.png"] = 7904,
+        ["icons\\Emote_RushinAround.png"] = 7696,
+        ["icons\\Emote_Salt.png"] = 6084,
+        ["icons\\Emote_Salute.png"] = 8132,
+        ["icons\\Emote_SaySo.png"] = 7274,
+        ["icons\\Emote_Scenario.png"] = 6475,
+        ["icons\\Emote_Showstopper.png"] = 7363,
+        ["icons\\Emote_Smooth_Moves.png"] = 7111,
+        ["icons\\Emote_SmoothDrive.png"] = 7612,
+        ["icons\\Emote_Snap.png"] = 8129,
+        ["icons\\Emote_Sprinkler.png"] = 6929,
+        ["icons\\Emote_StageBow.png"] = 7200,
+        ["icons\\Emote_Stuck.png"] = 7311,
+        ["icons\\Emote_TechnoZombie.png"] = 8018,
+        ["icons\\Emote_ThumbsDown.png"] = 6298,
+        ["icons\\Emote_ThumbsUp.png"] = 6221,
+        ["icons\\Emote_ToosieSlide.png"] = 6646,
+        ["icons\\Emote_TRex.png"] = 8620,
+        ["icons\\Emote_Twist.png"] = 7167,
+        ["icons\\Emote_Walkywalk_Walk.png"] = 8455,
+        ["icons\\Emote_WarehouseDance_Start.png"] = 7112,
+        ["icons\\Emote_Wave2.png"] = 5870,
+        ["icons\\Emote_Wiggle.png"] = 7479,
+        ["icons\\Emote_Yeet.png"] = 7534,
+        ["icons\\Emote_Youre_Awesome.png"] = 7644,
+        ["icons\\Emote_Zippy_Dance.png"] = 6507,
+        ["music\\DanceMoves.wav"] = 696044,
+        ["music\\ElectroShuffle.wav"] = 1338860,
+        ["music\\Emote_AerobicChamp.wav"] = 2228204,
+        ["music\\Emote_AirShredder.wav"] = 4135916,
+        ["music\\Emote_BandOfTheFort.wav"] = 1573868,
+        ["music\\Emote_Bendy.wav"] = 1615340,
+        ["music\\Emote_BlindingLights.wav"] = 2490860,
+        ["music\\Emote_BlowKiss.wav"] = 54284,
+        ["music\\Emote_BoogieDown.wav"] = 3237276,
+        ["music\\Emote_Calculated.wav"] = 509420,
+        ["music\\Emote_Capoeira.wav"] = 1444844,
+        ["music\\Emote_Celebration.wav"] = 564716,
+        ["music\\Emote_Cena.wav"] = 1306604,
+        ["music\\Emote_Charleston.wav"] = 1306604,
+        ["music\\Emote_Chicken.wav"] = 652268,
+        ["music\\Emote_Crossbounce.wav"] = 2656748,
+        ["music\\Emote_Cry.wav"] = 1389548,
+        ["music\\Emote_Dance_Breakdance.wav"] = 1297388,
+        ["music\\Emote_Dance_Disco_T3.wav"] = 1509356,
+        ["music\\Emote_Dance_Loser.wav"] = 2232812,
+        ["music\\Emote_Dance_NoBones.wav"] = 2712044,
+        ["music\\Emote_Dance_Pump.wav"] = 2449388,
+        ["music\\Emote_Dance_RideThePony.wav"] = 315884,
+        ["music\\Emote_Dance_Shoot.wav"] = 2375660,
+        ["music\\Emote_Dance_SwipeIt.wav"] = 2338796,
+        ["music\\Emote_Dance_Worm.wav"] = 1219052,
+        ["music\\Emote_DG_Disco.wav"] = 1311212,
+        ["music\\Emote_DistractionDance.wav"] = 1301996,
+        ["music\\Emote_DustingOffHands.wav"] = 587756,
+        ["music\\Emote_DustOffShoulders.wav"] = 3681440,
+        ["music\\Emote_EasternBloc.wav"] = 2532332,
+        ["music\\Emote_Facepalm.wav"] = 412652,
+        ["music\\Emote_FancyFeet.wav"] = 2974700,
+        ["music\\Emote_Fishing.wav"] = 712172,
+        ["music\\Emote_Flex.wav"] = 1583084,
+        ["music\\Emote_FlippnSexy.wav"] = 647660,
+        ["music\\Emote_FlossDance.wav"] = 1477100,
+        ["music\\Emote_Fresh.wav"] = 896492,
+        ["music\\Emote_Friday13.wav"] = 2725868,
+        ["music\\Emote_Gangnam_Style.wav"] = 5112812,
+        ["music\\Emote_Ghostbusters.wav"] = 5891564,
+        ["music\\Emote_golfclap.wav"] = 689132,
+        ["music\\Emote_Griddy.wav"] = 4315628,
+        ["music\\Emote_GrooveJam.wav"] = 2670572,
+        ["music\\Emote_guitar.wav"] = 1795052,
+        ["music\\Emote_HandSignals.wav"] = 1693676,
+        ["music\\Emote_Headbanger.wav"] = 4817900,
+        ["music\\Emote_HeelClick.wav"] = 348140,
+        ["music\\Emote_Hillbilly_Shuffle.wav"] = 1241964,
+        ["music\\Emote_Hip_Hop.wav"] = 2569196,
+        ["music\\Emote_HitchHiker.wav"] = 2942444,
+        ["music\\Emote_Hotstuff.wav"] = 532460,
+        ["music\\Emote_Hula.wav"] = 2495468,
+        ["music\\Emote_ILikeToMoveIt.wav"] = 1301996,
+        ["music\\Emote_InDaGhetto.wav"] = 2679788,
+        ["music\\Emote_InfiniDab.wav"] = 2730476,
+        ["music\\Emote_Intensity.wav"] = 6232556,
+        ["music\\Emote_IrishJig.wav"] = 2131436,
+        ["music\\Emote_ItsGoTime.wav"] = 2716652,
+        ["music\\Emote_KneeSlapper.wav"] = 5504492,
+        ["music\\Emote_KoreanEagle.wav"] = 3292652,
+        ["music\\Emote_Kpop.wav"] = 1357292,
+        ["music\\Emote_Laugh.wav"] = 1619948,
+        ["music\\Emote_Lebron.wav"] = 1596908,
+        ["music\\Emote_LivingLarge.wav"] = 2924012,
+        ["music\\Emote_Luchador.wav"] = 1200620,
+        ["music\\Emote_Macarena.wav"] = 13245932,
+        ["music\\Emote_Make_It_Rain.wav"] = 822764,
+        ["music\\Emote_Maracas.wav"] = 1440236,
+        ["music\\Emote_Martian.wav"] = 4582892,
+        ["music\\Emote_Mask_Off.wav"] = 3343340,
+        ["music\\Emote_NeverGonna.wav"] = 5933036,
+        ["music\\Emote_NinjaStyle.wav"] = 2642924,
+        ["music\\Emote_PopLock.wav"] = 2937836,
+        ["music\\Emote_PopRock.wav"] = 2827244,
+        ["music\\Emote_PumpkinDance.wav"] = 2195948,
+        ["music\\Emote_PumpUpTheJam.wav"] = 2702828,
+        ["music\\Emote_RememberMe.wav"] = 6997484,
+        ["music\\Emote_Renegade.wav"] = 4559852,
+        ["music\\Emote_RobotDance.wav"] = 3495404,
+        ["music\\Emote_Rollie.wav"] = 7462892,
+        ["music\\Emote_RushinAround.wav"] = 5324780,
+        ["music\\Emote_Salute.wav"] = 352748,
+        ["music\\Emote_SaySo.wav"] = 3043820,
+        ["music\\Emote_Scenario.wav"] = 5771756,
+        ["music\\Emote_Showstopper.wav"] = 2606060,
+        ["music\\Emote_Smooth_Moves.wav"] = 3357164,
+        ["music\\Emote_SmoothDrive.wav"] = 3684332,
+        ["music\\Emote_Snap.wav"] = 338924,
+        ["music\\Emote_Sprinkler.wav"] = 3979244,
+        ["music\\Emote_StageBow.wav"] = 601580,
+        ["music\\Emote_Stuck.wav"] = 4052972,
+        ["music\\Emote_TechnoZombie.wav"] = 1698284,
+        ["music\\Emote_ToosieSlide.wav"] = 6218732,
+        ["music\\Emote_TRex.wav"] = 2251244,
+        ["music\\Emote_Twist.wav"] = 1974764,
+        ["music\\Emote_Walkywalk_Walk.wav"] = 5089772,
+        ["music\\Emote_WarehouseDance.wav"] = 5610476,
+        ["music\\Emote_Wiggle.wav"] = 914924,
+        ["music\\Emote_Yeet.wav"] = 394220,
+        ["music\\Emote_Youre_Awesome.wav"] = 873452,
+        ["music\\Emote_Zippy_Dance.wav"] = 1297388,
+    }
+    local attributes = ffi.new("emote_resource_attributes[1]")
+    local modelSize = 6239204
+    local modelHash = "45bfa5b2d87d0305cf29d076f8c7b15b5f086d8c521fc8fb4683c812054c43ee"
+    local sha256 = utf16("SHA256")
+    local function fileHasSize(path, size)
         local wide = widePath(path)
-        if not wide then return false end
-        local attr = tonumber(win.GetFileAttributesW(wide))
-        return attr ~= 0xffffffff and math.floor(attr / 16) % 2 == 0
+        if not wide or win.GetFileAttributesExW(wide, 0, attributes) == 0 then return false end
+        local info = attributes[0]
+        return math.floor(info.attributes / 16) % 2 == 0 and info.sizeHigh == 0 and info.sizeLow == size
+    end
+    local function modelMatches(path)
+        local bytes, size = readAsset(path, modelSize, modelSize)
+        if not bytes then return false end
+        local hash = ffi.new("uint8_t[32]")
+        local length = ffi.new("uint32_t[1]", 32)
+        if crypto.CryptHashCertificate2(sha256, 0, nil, bytes, size, hash, length) == 0
+            or length[0] ~= 32 then return false end
+        for i = 0, 31 do
+            if hash[i] ~= tonumber(modelHash:sub(2 * i + 1, 2 * i + 2), 16) then return false end
+        end
+        return true
     end
     local function installed(gameDir)
-        return resourceRoot and gameDir and fileExists(resourceRoot .. "\\installed")
-            and fileExists(gameDir .. "\\characters\\kolka\\fortnite_dance.vmdl_c")
+        if not resourceRoot or not gameDir then return false end
+        local path = gameDir .. "\\characters\\kolka\\fortnite_dance.vmdl_c"
+        if not fileHasSize(path, modelSize) then return false end
+        for file, size in pairs(resourceSizes) do
+            if not fileHasSize(resourceRoot .. "\\" .. file, size) then return false end
+        end
+        return modelMatches(path)
     end
     local function encodedCommand()
         local body, chars = utf16(installScript)
@@ -2133,7 +2382,7 @@ exit $exitCode
         local now = tonumber(utils.timestamp()) or 0
         if not process then
             if now >= (nextPoll or 0) then
-                nextPoll = now + 1000
+                nextPoll = now + 3000
                 gameDir = gameResourceDir()
                 if installed(gameDir) then showMenu() end
             end
