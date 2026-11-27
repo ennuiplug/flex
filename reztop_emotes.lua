@@ -15,6 +15,11 @@ local downloadButton = settings:button("Скачать ресурсы", function
     end
 end)
 local progress = settings:slider("Прогресс установки", 0, 100, 0, 1, "%")
+local cancelInstall
+local cancelButton = settings:button("Остановить загрузку", function()
+    if cancelInstall then cancelInstall() end
+end)
+cancelButton:visible(false)
 progress:disabled(true)
 progress:visible(false)
 status = settings:label("Подключение к GitHub")
@@ -1924,14 +1929,61 @@ $url = 'https://github.com/ennuiplug/flex/releases/download/v1.0.0/emotes.zip'
 $archiveHash = 'C214489498AC541C4C87CBF1F2ABDCF528E44911597CE9D391A592752AC04DF0'
 $archiveSize = 250242910
 $journal = Join-Path $root ("install-$PID.log")
+$cancelFile = Join-Path $root ("install-$PID.cancel")
+$partial = Join-Path $root 'download.part'
 $utf8 = New-Object Text.UTF8Encoding($false)
 $mutex = New-Object Threading.Mutex($false, 'Local\RezTOP.EmoteWheel.v1')
 $owns = $false
 $zip = $part = $modelPart = $http = $response = $inputStream = $outputStream = $null
 $exitCode = 0
+$cancelled = $false
+$started = $false
+$wroteModel = $false
+$backupModel = $null
 
 function Write-Journal([string]$line) {
     [IO.File]::AppendAllText($journal, $line + [Environment]::NewLine, $utf8)
+}
+
+function Read-Sha256([string]$path) {
+    $stream = [IO.File]::OpenRead($path)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '') }
+    finally { $sha.Dispose(); $stream.Dispose() }
+}
+
+function Assert-Continue {
+    if ([IO.File]::Exists($cancelFile)) {
+        $script:cancelled = $true
+        throw 'Installation cancelled'
+    }
+}
+
+function Wait-Download($task) {
+    while (-not $task.IsCompleted) {
+        Assert-Continue
+        [void]$task.Wait(100)
+    }
+    Assert-Continue
+}
+
+function Clear-PartialResources {
+    foreach ($name in @('icons', 'music')) {
+        $dir = Join-Path $root $name
+        if (-not [IO.Directory]::Exists($dir)) { continue }
+        if (([IO.File]::GetAttributes($dir) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Unexpected directory link: $dir"
+        }
+        $extension = if ($name -eq 'icons') { '*.png' } else { '*.wav' }
+        foreach ($asset in [IO.Directory]::EnumerateFiles($dir, $extension)) { [IO.File]::Delete($asset) }
+        if (-not [IO.Directory]::EnumerateFileSystemEntries($dir).GetEnumerator().MoveNext()) {
+            [IO.Directory]::Delete($dir)
+        }
+    }
+    foreach ($path in @($partial, (Join-Path $root 'installed'))) { [IO.File]::Delete($path) }
+    foreach ($path in [IO.Directory]::EnumerateFiles($root, '*.zip')) {
+        if ([IO.Path]::GetFileName($path) -cmatch '^[a-z0-9]{8}\.[a-z0-9]{3}\.zip$') { [IO.File]::Delete($path) }
+    }
 }
 
 try {
@@ -1939,21 +1991,26 @@ try {
     if (-not $owns) { exit 2 }
     [void][IO.Directory]::CreateDirectory($root)
     [IO.File]::WriteAllText($journal, '', $utf8)
+    if (([IO.File]::GetAttributes($root) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Unexpected resource directory link: $root"
+    }
     Write-Journal "S Скачивание архива (250 МБ)"
     Write-Journal "L Источник: $url"
     Write-Journal "L Иконки и музыка: $root"
     Write-Journal "L Модель CS2: $modelPath"
-    $hasModel = [IO.File]::Exists($modelPath)
-    if ($hasModel -and (Get-FileHash -LiteralPath $modelPath -Algorithm SHA256).Hash -ne $modelHash) {
-        throw "Existing model differs from the release: $modelPath"
-    }
-    $part = Join-Path $root ([IO.Path]::GetRandomFileName() + '.zip')
+    $hasModel = [IO.File]::Exists($modelPath) -and (Read-Sha256 $modelPath) -eq $modelHash
+    Clear-PartialResources
+    $started = $true
+    Assert-Continue
+    $part = $partial
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     Add-Type -AssemblyName System.Net.Http
     $http = New-Object Net.Http.HttpClient
     $http.Timeout = [TimeSpan]::FromMinutes(10)
     $http.DefaultRequestHeaders.UserAgent.ParseAdd('RezTOP-EmoteWheel')
-    $response = $http.GetAsync($url, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+    $task = $http.GetAsync($url, [Net.Http.HttpCompletionOption]::ResponseHeadersRead)
+    Wait-Download $task
+    $response = $task.GetAwaiter().GetResult()
     [void]$response.EnsureSuccessStatusCode()
     $inputStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
     if ($inputStream.CanTimeout) { $inputStream.ReadTimeout = 60000 }
@@ -1962,7 +2019,11 @@ try {
     $downloaded = 0L
     $lastProgress = -1
     $lastMilestone = 0
-    while (($read = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+    while ($true) {
+        $task = $inputStream.ReadAsync($buffer, 0, $buffer.Length)
+        Wait-Download $task
+        $read = $task.GetAwaiter().GetResult()
+        if ($read -eq 0) { break }
         $downloaded += $read
         if ($downloaded -gt $archiveSize) { throw 'Resource archive exceeds expected size' }
         $outputStream.Write($buffer, 0, $read)
@@ -1982,7 +2043,7 @@ try {
     Write-Journal 'S Проверка SHA-256'
     Write-Journal 'L Архив получен, проверяется размер и SHA-256.'
     if ($downloaded -ne $archiveSize -or
-        (Get-FileHash -LiteralPath $part -Algorithm SHA256).Hash -ne $archiveHash) {
+        (Read-Sha256 $part) -ne $archiveHash) {
         throw 'Resource archive checksum does not match release'
     }
     Write-Journal 'P 90'
@@ -1998,12 +2059,14 @@ try {
     Write-Journal 'S Установка иконок'
     Write-Journal "L Распаковка 118 иконок: $iconDir"
     foreach ($asset in $icons) {
+        Assert-Continue
         [IO.Compression.ZipFileExtensions]::ExtractToFile($asset, (Join-Path $iconDir $asset.Name), $true)
     }
     Write-Journal 'P 94'
     Write-Journal 'S Установка музыки'
     Write-Journal "L Распаковка 102 звуковых дорожек: $musicDir"
     foreach ($asset in $music) {
+        Assert-Continue
         [IO.Compression.ZipFileExtensions]::ExtractToFile($asset, (Join-Path $musicDir $asset.Name), $true)
     }
     Write-Journal 'P 98'
@@ -2013,17 +2076,25 @@ try {
         [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($modelPath))
         $modelPart = $modelPath + '.' + [IO.Path]::GetRandomFileName()
         [IO.Compression.ZipFileExtensions]::ExtractToFile($model, $modelPart, $false)
-        if ((Get-FileHash -LiteralPath $modelPart -Algorithm SHA256).Hash -ne $modelHash) { throw 'Model checksum does not match release' }
+        if ((Read-Sha256 $modelPart) -ne $modelHash) { throw 'Model checksum does not match release' }
+        Assert-Continue
+        if ([IO.File]::Exists($modelPath)) {
+            $backupModel = $modelPath + '.backup-' + [IO.Path]::GetRandomFileName()
+            [IO.File]::Move($modelPath, $backupModel)
+            Write-Journal "L Резервная копия предыдущей модели: $backupModel"
+        }
         [IO.File]::Move($modelPart, $modelPath)
+        $wroteModel = $true
     } else {
         Write-Journal "L Модель уже установлена, контрольная сумма совпадает: $modelPath"
     }
+    Assert-Continue
     [IO.File]::WriteAllText((Join-Path $root 'installed'), $archiveHash)
     Write-Journal 'P 100'
     Write-Journal 'L Установка завершена. Ресурсы готовы.'
 } catch {
-    $exitCode = 1
-    if ([IO.Directory]::Exists($root)) {
+    $exitCode = if ($cancelled) { 3 } else { 1 }
+    if (-not $cancelled -and [IO.Directory]::Exists($root)) {
         Write-Journal ('E ' + ($_.Exception.Message -replace '[\r\n]+', ' '))
         [IO.File]::WriteAllText((Join-Path $root 'install-error.txt'), $_.Exception.Message)
     }
@@ -2035,13 +2106,25 @@ try {
     if ($zip) { $zip.Dispose() }
     if ($part -and [IO.File]::Exists($part)) { [IO.File]::Delete($part) }
     if ($modelPart -and [IO.File]::Exists($modelPart)) { [IO.File]::Delete($modelPart) }
+    if ($started -and $exitCode -ne 0) {
+        try {
+            if ($wroteModel) { [IO.File]::Delete($modelPath) }
+            if ($backupModel -and [IO.File]::Exists($backupModel)) { [IO.File]::Move($backupModel, $modelPath) }
+            Clear-PartialResources
+            if ($cancelled) { Write-Journal 'L Загрузка остановлена. Временные ресурсы удалены.' }
+        } catch {
+            $exitCode = 1
+            Write-Journal ('E Ошибка очистки: ' + $_.Exception.Message)
+        }
+    }
+    if ($owns) { [IO.File]::Delete($cancelFile) }
     if ($owns) { $mutex.ReleaseMutex() }
     $mutex.Dispose()
 }
 exit $exitCode
 ]==]
 
-    local process, journal, journalOffset, nextPoll, loggedError, ready
+    local process, journal, cancelPath, journalOffset, nextPoll, loggedError, ready, cancelPending
     local exitCode = ffi.new("uint32_t[1]")
     local resourceSizes = {
         ["icons\\DanceMoves.png"] = 6064,
@@ -2313,14 +2396,29 @@ exit $exitCode
         for _, control in ipairs(menuControls) do control:visible(true) end
         downloadButton:visible(false)
         progress:visible(false)
+        cancelButton:visible(false)
         status:visible(false)
         ready = true
     end
     local function showInstallError(message)
         progress:visible(false)
+        cancelButton:visible(false)
         downloadButton:visible(true)
         status:name(message)
         status:visible(true)
+    end
+    local function exists(path)
+        local wide = widePath(path)
+        return wide ~= nil and tonumber(win.GetFileAttributesW(wide)) ~= 0xffffffff
+    end
+    local function showPartial()
+        if not resourceRoot then return end
+        if exists(resourceRoot .. "\\icons") or exists(resourceRoot .. "\\music")
+            or exists(resourceRoot .. "\\download.part") or exists(resourceRoot .. "\\installed")
+            or (gameDir and exists(gameDir .. "\\characters\\kolka\\fortnite_dance.vmdl_c")) then
+            status:name("Часть ресурсов отсутствует или повреждена. Скачай заново.")
+            status:visible(true)
+        end
     end
     beginInstall = function()
         if process then return end
@@ -2340,16 +2438,33 @@ exit $exitCode
             return
         end
         process = info[0].process
-        journal = resourceRoot .. "\\install-" .. tostring(tonumber(info[0].pid)) .. ".log"
-        journalOffset, nextPoll, loggedError = 0, 0, false
+        local jobPath = resourceRoot .. "\\install-" .. tostring(tonumber(info[0].pid))
+        journal, cancelPath = jobPath .. ".log", jobPath .. ".cancel"
+        journalOffset, nextPoll, loggedError, cancelPending = 0, 0, false, false
         win.CloseHandle(info[0].thread)
         downloadButton:visible(false)
         progress:set(0)
         progress:visible(true)
+        cancelButton:visible(true)
         status:name("Подключение к GitHub")
         status:visible(true)
     end
-    if installed(gameDir) then showMenu() end
+    local function signalCancel()
+        local wide = widePath(cancelPath)
+        if not wide then return end
+        local handle = win.CreateFileW(wide, 0x40000000, 7, nil, 4, 0x80, nil)
+        if handle == nil or handle == ffi.cast("void *", -1) then return end
+        win.CloseHandle(handle)
+        cancelPending = false
+    end
+    cancelInstall = function()
+        if not process then return end
+        cancelPending = true
+        signalCancel()
+        cancelButton:visible(false)
+        status:name("Остановка и очистка файлов")
+    end
+    if installed(gameDir) then showMenu() else showPartial() end
 
     local function readJournal()
         local buffer, size = readAsset(journal, 1, 64 * 1024)
@@ -2371,7 +2486,7 @@ exit $exitCode
         end
         journalOffset = journalOffset + (consumed or 0)
         if latestProgress and latestProgress >= 0 and latestProgress <= 100 then progress:set(latestProgress) end
-        if latestStage then status:name(latestStage) end
+        if latestStage and cancelButton:visible() then status:name(latestStage) end
     end
 
     closeInstaller = function()
@@ -2392,6 +2507,7 @@ exit $exitCode
         local running = ok and exitCode[0] == 259
         if not running or now >= nextPoll then
             nextPoll = now + 120
+            if running and cancelPending then signalCancel() end
             readJournal()
         end
         if running then return false end
@@ -2401,6 +2517,8 @@ exit $exitCode
             showMenu()
         elseif ok and exitCode[0] == 2 then
             showInstallError("Установка уже запущена")
+        elseif ok and exitCode[0] == 3 then
+            showInstallError("Загрузка остановлена, временные файлы удалены")
         else
             showInstallError("Ошибка установки · install-error.txt")
             if not loggedError then logError("Ошибка установки ресурсов. Журнал: " .. resourceRoot .. "\\install-error.txt") end
