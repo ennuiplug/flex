@@ -3,7 +3,29 @@ local tab = ui.tab("Emote wheel")
 local playSelectedDance, stopSelectedDance, resetWheel, freezeWheelView
 local musicEnabled, volume, cameraDistance, allowWalking, loopAnimation, readAsset, widePath
 local resourceRoot, gameResourceDir, tickInstaller, closeInstaller
-local settings, favoriteSettings
+local settings = tab:group("Колесо эмоций", "left")
+local beginInstall, loadFavoriteControls
+local status, menuControls = nil, {}
+local downloadButton = settings:button("Скачать ресурсы", function()
+    if beginInstall then
+        beginInstall()
+    else
+        status:name("Установщик не инициализировался")
+        status:visible(true)
+    end
+end)
+local progress = settings:slider("Прогресс установки", 0, 100, 0, 1, "%")
+progress:disabled(true)
+progress:visible(false)
+status = settings:label("Подключение к GitHub")
+status:visible(false)
+
+local function afterInstall(control)
+    control:visible(false)
+    menuControls[#menuControls + 1] = control
+    return control
+end
+
 local function logError(message)
     print("[emotes] ", message)
 end
@@ -133,8 +155,6 @@ do
 
 
 
-    settings = tab:group("Колесо эмоций", "left")
-
     local slots = 6
     local pi = math.pi
     local step = 2 * pi / slots
@@ -164,14 +184,16 @@ do
     addPages("Эмоции", gestures)
 
     local favoriteControls = {}
-    favoriteSettings = tab:group("Избранные эмоции", "right")
-    for i = 1, slots do
-        local default = emotes[i][2]
-        local choices = {default, "Пусто"}
-        for _, entry in ipairs(emotes) do
-            if entry[2] ~= default then choices[#choices + 1] = entry[2] end
+    loadFavoriteControls = function()
+        local favoriteSettings = tab:group("Избранные эмоции", "right")
+        for i = 1, slots do
+            local default = emotes[i][2]
+            local choices = {default, "Пусто"}
+            for _, entry in ipairs(emotes) do
+                if entry[2] ~= default then choices[#choices + 1] = entry[2] end
+            end
+            favoriteControls[i] = favoriteSettings:combo("Слот " .. i, choices)
         end
-        favoriteControls[i] = favoriteSettings:combo("Слот " .. i, choices)
     end
 
     local fixedNames = {
@@ -344,24 +366,24 @@ do
     end
 
     local function addBindButton(bind, label)
-        bind.button = settings:button(label, function()
+        bind.button = afterInstall(settings:button(label, function()
             close()
             if captured then showBind(captured.bind) end
             captured = {bind = bind, keys = {}}
             for _, key in ipairs(captureKeys) do captured.keys[key] = utils.key_state(key) end
             bind.button:name("Нажми клавишу · Esc отменяет")
-        end)
+        end))
         showBind(bind)
     end
     addBindButton(openBind, "Назначить клавишу колеса")
     addBindButton(stopBind, "Назначить клавишу остановки")
-    local repeatOnTap = settings:toggle("Повтор по короткому нажатию", true)
-    musicEnabled = settings:toggle("Музыка эмоций", true)
-    volume = settings:slider("Громкость эмоций", 0, 100, 100, 1, "%")
+    local repeatOnTap = afterInstall(settings:toggle("Повтор по короткому нажатию", true))
+    musicEnabled = afterInstall(settings:toggle("Музыка эмоций", true))
+    volume = afterInstall(settings:slider("Громкость эмоций", 0, 100, 100, 1, "%"))
     musicEnabled:set_callback(function(self) volume:disabled(not self:get()) end, true)
-    cameraDistance = settings:slider("Дистанция третьего лица", 48, 256, 128)
-    allowWalking = settings:toggle("Ходить во время танца", false)
-    loopAnimation = settings:toggle("Зацикливать анимацию", false)
+    cameraDistance = afterInstall(settings:slider("Дистанция третьего лица", 48, 256, 128))
+    allowWalking = afterInstall(settings:toggle("Ходить во время танца", false))
+    loopAnimation = afterInstall(settings:toggle("Зацикливать анимацию", false))
 
     local detailFont = render.load_font("Bahnschrift", 15, "outline")
     local smallFont = render.load_font("Verdana", 12, "outline")
@@ -2013,8 +2035,6 @@ try {
 exit $exitCode
 ]==]
 
-    local installer = tab:group("Ресурсы", "right")
-    local downloadButton, status, progress
     local process, journal, journalOffset, nextPoll, loggedError, ready
     local exitCode = ffi.new("uint32_t[1]")
     local function fileExists(path)
@@ -2040,10 +2060,12 @@ exit $exitCode
 
     local gameDir = gameResourceDir()
     local function showMenu()
+        loadFavoriteControls()
+        for _, control in ipairs(menuControls) do control:visible(true) end
+        downloadButton:visible(false)
+        progress:visible(false)
+        status:visible(false)
         ready = true
-        installer:visible(false)
-        settings:visible(true)
-        favoriteSettings:visible(true)
     end
     local function showInstallError(message)
         progress:visible(false)
@@ -2051,7 +2073,7 @@ exit $exitCode
         status:name(message)
         status:visible(true)
     end
-    downloadButton = installer:button("Скачать ресурсы", function()
+    beginInstall = function()
         if process then return end
         gameDir = gameResourceDir()
         if not resourceRoot or not gameDir then showInstallError("Не удалось определить папки установки") return end
@@ -2077,18 +2099,8 @@ exit $exitCode
         progress:visible(true)
         status:name("Подключение к GitHub")
         status:visible(true)
-    end)
-    progress = installer:slider("Прогресс установки", 0, 100, 0, 1, "%")
-    progress:disabled(true)
-    progress:visible(false)
-    status = installer:label("Подключение к GitHub")
-    status:visible(false)
-    if installed(gameDir) then
-        showMenu()
-    else
-        settings:visible(false)
-        favoriteSettings:visible(false)
     end
+    if installed(gameDir) then showMenu() end
 
     local function readJournal()
         local buffer, size = readAsset(journal, 1, 64 * 1024)
